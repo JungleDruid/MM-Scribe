@@ -498,7 +498,9 @@ BUFF_TICK_MS = 200                # 倒數重繪間隔。100ms 以下只是白�
 #   B = 0.6*0x50 + 0.4*0x3A = 0x47
 BUFF_FILL_COLOR = "#347747"
 BUFF_INFINITE_TEXT = "∞"          # 無限持續的 buff 沒有秒數可倒數,進度條固定滿格
-PANE_CONTENT_MIN_H = 90           # 攻擊日誌 / 技能排行 / Buff / 覆蓋率內容區的
+BUFF_VIEW_LIVE = "即時監測"
+BUFF_VIEW_COVERAGE = "覆蓋率"
+PANE_CONTENT_MIN_H = 90           # 攻擊日誌 / 技能排行 / Buff 三個 pane 內容區的
                                   # 最小高度。均分靠 grid uniform,而 uniform 會把所有
                                   # row 拉到「需求最高」的那個,所以三者必須給同一個值,
                                   # 否則會互相頂高、把視窗撐爆
@@ -1282,7 +1284,7 @@ class LiveDamageMonitor:
         ctk.set_window_scaling(self.font_scale)
 
         self.root.title(f"MM Scribe {VERSION_STR}")
-        # 初始高度 900,四個資訊 pane 均分可用高度;
+        # 初始高度 900,三個資訊 pane 均分可用高度;
         # 每個 popout 中的 pane 從初值扣 200,啟動就用正確高度,
         # 不能在 __init__ 尾端做 delta 調整 — 那時 winfo_height() 因視窗尚未 realize
         # 回傳 1,dcalc 後會被 clamp 到 200 → 主視窗變超小、看不到開始按鈕
@@ -1447,7 +1449,7 @@ class LiveDamageMonitor:
         self.skill_collapsed = False
         self.merge_var = tk.BooleanVar(value=False)
         self.buff_collapsed = False
-        self.buff_coverage_collapsed = False
+        self.buff_view = BUFF_VIEW_LIVE
 
         # 治癒統計 (heal_total = heal_self + heal_ally,累加自 0x5029 事件)
         self.heal_total = 0
@@ -1491,7 +1493,7 @@ class LiveDamageMonitor:
 
         # -- 覆蓋率列: COVERAGE_TAGS (資料筆數 < COVERAGE_MIN_HITS 時顯示「—」) --
         cov_row = ctk.CTkFrame(self.dmg_banner, fg_color="transparent")
-        cov_row.pack(fill="x", pady=(0, 8))
+        cov_row.pack(fill="x", pady=(0, 4))
 
         self.lbl_cov = {}
         for tag_name in COVERAGE_TAGS:
@@ -1505,6 +1507,14 @@ class LiveDamageMonitor:
                                text_color="#88ccff")
             lbl.pack()
             self.lbl_cov[tag_name] = lbl
+
+        self.lbl_battle_time = ctk.CTkLabel(
+            self.dmg_banner, text="戰鬥時間 —", font=(FONT_UI, 11),
+            text_color="#aaaaaa", height=22)
+        self.lbl_battle_time.pack(fill="x", padx=10, pady=(0, 6))
+        self._bind_tooltip(
+            self.lbl_battle_time,
+            "依目前選取目標的首筆至末筆傷害計算，亦為 Buff 覆蓋率的戰鬥區間。")
 
         # ----------------------------------------------------
         # 1.5 頂部看板:治癒統計 (packing 交給 _apply_tracking_mode)
@@ -1699,12 +1709,11 @@ class LiveDamageMonitor:
         #    抽成 _build_*_pane(parent) 方法,dock/popout 兩情境共用建立邏輯
         #    起始時 parent = root,若 popout_* 為 True,__init__ 尾端會 pop 出去
         # ----------------------------------------------------
-        # 四個資訊 pane 統一裝進 pane_container,高度由 _layout_panes 以 grid 均分
+        # 三個資訊 pane 統一裝進 pane_container,高度由 _layout_panes 以 grid 均分
         self.pane_container = ctk.CTkFrame(root, fg_color="transparent")
         self._build_log_pane(self.pane_container)
         self._build_skill_pane(self.pane_container)
         self._build_buff_pane(self.pane_container)
-        self._build_buff_coverage_pane(self.pane_container)
 
         # ----------------------------------------------------
         # 5.6 治癒事件日誌 (可折疊,packing 交給 _apply_tracking_mode)
@@ -1958,94 +1967,85 @@ class LiveDamageMonitor:
         return self.skill_pane
 
     def _build_buff_pane(self, parent):
-        """建立「即時 Buff 監測」pane。結構與技能傷害排行同一套(可折疊 + 捲動區),
-        差別是列不能展開、進度條是綠色、內容由 _buff_tick 自行倒數。
-        """
+        """共用一個可折疊 Buff 區塊,切換即時監測與覆蓋率而不重建資料列。"""
         self.buff_pane = ctk.CTkFrame(parent, corner_radius=0)
         buff_header = ctk.CTkFrame(self.buff_pane, fg_color="transparent")
         buff_header.pack(fill="x", padx=6, pady=(6, 0))
         self.btn_buff_toggle = ctk.CTkButton(
             buff_header,
-            text=("▶ 即時Buff監測 (已折疊)" if self.buff_collapsed
-                  else "▼ 即時Buff監測"),
+            text=("▶ Buff (已折疊)" if self.buff_collapsed else "▼ Buff"),
             font=(FONT_UI, 11),
             fg_color="transparent",
             hover_color="#2a2a2a",
             anchor="w",
             corner_radius=6,
             height=26,
+            width=90,
             command=self.toggle_buff_collapse,
         )
         self.btn_buff_toggle.pack(side="left", fill="x", expand=True)
+        self.buff_view_toggle = ctk.CTkSegmentedButton(
+            buff_header, values=[BUFF_VIEW_LIVE, BUFF_VIEW_COVERAGE],
+            font=(FONT_UI, 11), height=26, selected_color=TARGET_BTN_SELECTED,
+            command=self._on_buff_view_change)
+        self.buff_view_toggle.set(self.buff_view)
+        self.buff_view_toggle.pack(side="right", padx=(6, 0))
         self.buff_scroll = ctk.CTkScrollableFrame(self.buff_pane,
                                                    corner_radius=0,
                                                    fg_color="#242424",
                                                    height=BUFF_SCROLL_H)
-        if not self.buff_collapsed:
-            self.buff_scroll.pack(fill="both", expand=True, padx=6, pady=6)
+        self.lbl_buff_empty = ctk.CTkLabel(
+            self.buff_scroll, text="開始監控後顯示即時 Buff",
+            font=(FONT_UI, 11), text_color="#aaaaaa")
+        self.lbl_buff_empty.pack(fill="x", pady=4)
         self.buff_rows = {}
-        return self.buff_pane
-
-    def toggle_buff_collapse(self):
-        """折疊/展開即時 Buff 監測。折疊時 buff_scroll 隱藏但 active_buffs 持續更新。"""
-        if self.buff_collapsed:
-            self.buff_scroll.pack(fill="both", expand=True, padx=6, pady=6)
-            self.btn_buff_toggle.configure(text="▼ 即時Buff監測")
-            self.buff_collapsed = False
-        else:
-            self.buff_scroll.pack_forget()
-            self.btn_buff_toggle.configure(text="▶ 即時Buff監測 (已折疊)")
-            self.buff_collapsed = True
-        self._layout_panes()
-
-    def _build_buff_coverage_pane(self, parent):
-        """選取目標交手期間的 Buff 覆蓋率長條圖。"""
-        self.buff_coverage_pane = ctk.CTkFrame(parent, corner_radius=0)
-        header = ctk.CTkFrame(self.buff_coverage_pane, fg_color="transparent")
-        header.pack(fill="x", padx=6, pady=(6, 0))
-        self.btn_buff_coverage_toggle = ctk.CTkButton(
-            header, text="▼ Buff覆蓋率", font=(FONT_UI, 11),
-            fg_color="transparent", hover_color="#2a2a2a", anchor="w",
-            corner_radius=6, height=26, command=self.toggle_buff_coverage_collapse)
-        self.btn_buff_coverage_toggle.pack(fill="x")
-        self.buff_coverage_body = ctk.CTkFrame(
-            self.buff_coverage_pane, fg_color="transparent")
-        self.buff_coverage_body.pack(fill="both", expand=True, padx=6, pady=6)
-        self.lbl_buff_coverage_span = ctk.CTkLabel(
-            self.buff_coverage_body, text="尚無戰鬥時間資料", anchor="w",
-            font=(FONT_UI, 10), text_color="#aaaaaa")
-        self.lbl_buff_coverage_span.pack(fill="x")
         self.buff_coverage_scroll = ctk.CTkScrollableFrame(
-            self.buff_coverage_body, corner_radius=0, fg_color="#242424",
+            self.buff_pane, corner_radius=0, fg_color="#242424",
             height=BUFF_SCROLL_H)
-        self.buff_coverage_scroll.pack(fill="both", expand=True)
         self.lbl_buff_coverage_empty = ctk.CTkLabel(
             self.buff_coverage_scroll, text="尚無戰鬥時間資料",
             font=(FONT_UI, 11), text_color="#aaaaaa")
         self.lbl_buff_coverage_empty.pack(fill="x", pady=4)
         self.buff_coverage_rows = {}
         self._buff_coverage_order = ()
+        self._apply_buff_view()
+        return self.buff_pane
 
-    def toggle_buff_coverage_collapse(self):
-        self.buff_coverage_collapsed = not self.buff_coverage_collapsed
-        if self.buff_coverage_collapsed:
-            self.buff_coverage_body.pack_forget()
-            self.btn_buff_coverage_toggle.configure(text="▶ Buff覆蓋率 (已折疊)")
+    def _apply_buff_view(self):
+        """只隱藏/顯示既有捲動區,保留兩個檢視各自的資料列與捲動位置。"""
+        self.buff_scroll.pack_forget()
+        self.buff_coverage_scroll.pack_forget()
+        if not self.buff_collapsed:
+            scroll = (self.buff_scroll if self.buff_view == BUFF_VIEW_LIVE
+                      else self.buff_coverage_scroll)
+            scroll.pack(fill="both", expand=True, padx=6, pady=6)
+
+    def _on_buff_view_change(self, view):
+        self.buff_view = view
+        self.buff_view_toggle.set(view)
+        self._apply_buff_view()
+        if view == BUFF_VIEW_LIVE:
+            self.update_buff_list()
         else:
-            self.buff_coverage_body.pack(fill="both", expand=True, padx=6, pady=6)
-            self.btn_buff_coverage_toggle.configure(text="▼ Buff覆蓋率")
             self.update_buff_coverage()
+
+    def toggle_buff_collapse(self):
+        """兩種 Buff 檢視共用收合狀態,資料持續在背景記錄。"""
+        self.buff_collapsed = not self.buff_collapsed
+        self.btn_buff_toggle.configure(
+            text="▶ Buff (已折疊)" if self.buff_collapsed else "▼ Buff")
+        self._on_buff_view_change(self.buff_view)
         self._layout_panes()
 
-    # 四個資訊 pane 共用的 grid uniform 群組名。同群組 + 相同 weight 的 row,
+    # 三個資訊 pane 共用的 grid uniform 群組名。同群組 + 相同 weight 的 row,
     # Tk grid 保證高度完全相等 —— 這就是「均分」的實作
     _PANE_UNIFORM = "ldm_info_pane"
 
     def _layout_panes(self):
-        """把攻擊日誌 / 技能排行 / 即時 Buff / Buff 覆蓋率排進 pane_container。
+        """把攻擊日誌 / 技能排行 / Buff 共用區塊排進 pane_container。
 
         - 未折疊:weight=1 + uniform 群組 → 彼此高度相等;只剩一個展開時它吃滿
-        - 已折疊:weight=0 → 只佔標題列高度,所以四個標題永遠看得到
+        - 已折疊:weight=0 → 只佔標題列高度,所以三個標題永遠看得到
         - popout 出去的 pane 不在 container 內,自然不參與均分
         全部折疊時把 container 改成 expand=False,免得底下留一塊空白。
         """
@@ -2056,10 +2056,9 @@ class LiveDamageMonitor:
         if not self.popout_skill:
             panes.append((self.skill_pane, self.skill_collapsed))
         panes.append((self.buff_pane, self.buff_collapsed))
-        panes.append((self.buff_coverage_pane, self.buff_coverage_collapsed))
 
         container.grid_columnconfigure(0, weight=1)
-        for row in range(4):
+        for row in range(3):
             container.grid_rowconfigure(row, weight=0, uniform="")
         any_expanded = False
         for row, (pane, collapsed) in enumerate(panes):
@@ -2314,7 +2313,7 @@ class LiveDamageMonitor:
         """依 self.track_damage / self.track_heal 重新佈局所有可切換的 banner / pane。
         - status_bar 位於視窗最上方 (side=top),不可被壓縮
         - Banner (dmg_banner, heal_banner) 用 `before=ctrl_row1` 插入到控制列上方
-        - 四個資訊 pane (log/skill/buff/coverage) 一律裝在 pane_container 內,由
+        - 三個資訊 pane (log/skill/buff) 一律裝在 pane_container 內,由
           _layout_panes 均分高度;這裡只決定 container 與 heal_log_pane 的 pack
         - 底部診斷區塊不在此處理:它 side="bottom" 常駐,不隨追蹤模式變動
         """
@@ -2367,14 +2366,13 @@ class LiveDamageMonitor:
         if self.track_damage:
             parts.append(self.dmg_banner)
             parts.append(self.target_row)
-            # 四個資訊 pane 都會伸縮,最小高度只算它們的標題列 —— 標題必須永遠
+            # 三個資訊 pane 都會伸縮,最小高度只算它們的標題列 —— 標題必須永遠
             # 看得到 (內容區的最小高度由下面那 80px slack 涵蓋)
             if not self.popout_log:
                 parts.append(self.btn_log_toggle)
             if not self.popout_skill:
                 parts.append(self.btn_skill_toggle)
             parts.append(self.btn_buff_toggle)
-            parts.append(self.btn_buff_coverage_toggle)
         if self.track_heal:
             parts.append(self.heal_banner)
         req_h = sum(w.winfo_reqheight() for w in parts)
@@ -3625,7 +3623,7 @@ class LiveDamageMonitor:
         """
         try:
             self.update_buff_list()
-            if not self.buff_coverage_collapsed:
+            if not self.buff_collapsed and self.buff_view == BUFF_VIEW_COVERAGE:
                 self.update_buff_coverage()
         except Exception:
             pass
@@ -3656,6 +3654,20 @@ class LiveDamageMonitor:
         # 還沒認出自己就一列都不顯示 —— 沒有身分就無從判斷 buff 是不是自己的
         live = {} if me is None else {
             k: v for k, v in source.items() if v["owner"] == me}
+
+        if live:
+            self.lbl_buff_empty.pack_forget()
+        else:
+            if self.view_only:
+                text = "讀取存檔後請切換至覆蓋率"
+            elif self.is_monitoring and me is None:
+                text = "尚未偵測到角色 ID"
+            elif self.is_monitoring or self._buff_frozen_at is not None:
+                text = "目前沒有 Buff"
+            else:
+                text = "開始監控後顯示即時 Buff"
+            self.lbl_buff_empty.configure(text=text)
+            self.lbl_buff_empty.pack(fill="x", pady=4)
 
         for key, info in live.items():
             if key not in self.buff_rows:
@@ -3709,17 +3721,13 @@ class LiveDamageMonitor:
         first, last = bucket["first"], bucket["last"]
         valid_span = first is not None and last is not None and last > first
         if valid_span:
-            caption = (f"{self._target_label(self.selected_target)} · {last - first:.2f}s"
-                       "（首筆至末筆傷害）")
             intervals = (row for row in self._buff_intervals()
                          if row[0] not in EFFECT_IGNORE)
             stats = calculate_buff_coverage(intervals, first, last)
             empty = "此戰鬥區間沒有 Buff 紀錄"
         else:
-            caption = "尚無戰鬥時間資料"
             stats = []
             empty = "至少需要兩筆不同時間的傷害才能計算覆蓋率"
-        self.lbl_buff_coverage_span.configure(text=caption)
         live = {bid for bid, _name, _covered, _pct in stats}
         for bid in list(self.buff_coverage_rows):
             if bid not in live:
@@ -4266,12 +4274,15 @@ class LiveDamageMonitor:
         return b["cov_hits"] if tag_name in COVERAGE_TAGS_SUSTAIN else b["cov_main"]
 
     def update_dps(self):
+        """DPS 與看板底部的戰鬥時間使用同一個選取目標。"""
         b = self._view()
         if b["first"] is None or b["last"] is None:
             self.lbl_dps.configure(text="0")
+            self.lbl_battle_time.configure(text="戰鬥時間 —")
             return
-        elapsed = max(b["last"] - b["first"], 1.0)
-        self.lbl_dps.configure(text=f"{b['damage'] / elapsed:,.0f}")
+        elapsed = max(b["last"] - b["first"], 0.0)
+        self.lbl_battle_time.configure(text=f"戰鬥時間 {elapsed:.2f}s")
+        self.lbl_dps.configure(text=f"{b['damage'] / max(elapsed, 1.0):,.0f}")
 
     # ================================================
     # 封包解析
@@ -6410,6 +6421,8 @@ class LiveDamageMonitor:
         if self._monitor_start_wall is None:
             self._monitor_start_wall = time.time()
 
+        self._on_buff_view_change(BUFF_VIEW_LIVE)
+
         # 已顯示中的技能排行列即時套用新名稱
         self.update_skill_ranking()
 
@@ -6945,6 +6958,8 @@ class LiveDamageMonitor:
         self.damage_events.extend(parsed["events"])
         self._recorded_buff_intervals = parsed["buffs"]
 
+        self._on_buff_view_change(BUFF_VIEW_COVERAGE)
+
         self._refresh_target_options()
         self._refresh_stats_view()
         self._render_log()
@@ -6981,6 +6996,7 @@ class LiveDamageMonitor:
         self.update_skill_ranking()
         self.lbl_total_dmg.configure(text="0")
         self.lbl_dps.configure(text="0")
+        self.lbl_battle_time.configure(text="戰鬥時間 —")
         self.lbl_target_hits.configure(text="0 筆")
         self.update_coverage()
 
