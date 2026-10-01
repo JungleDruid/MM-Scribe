@@ -910,6 +910,36 @@ def target_btn_width(text):
                max(TARGET_BTN_MIN_W, display_units(text) * TARGET_BTN_UNIT_W + 12))
 
 
+def get_monitor_work_area(x, y):
+    """Windows:取得指定虛擬桌面座標所在螢幕的工作區,含負座標;失敗回傳 None。"""
+    if not IS_WINDOWS:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD),
+                        ("rcMonitor", wintypes.RECT),
+                        ("rcWork", wintypes.RECT),
+                        ("dwFlags", wintypes.DWORD)]
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+        user32.MonitorFromPoint.restype = wintypes.HANDLE
+        user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MONITORINFO)]
+        user32.GetMonitorInfoW.restype = wintypes.BOOL
+        monitor = user32.MonitorFromPoint(wintypes.POINT(x, y), 2)  # DEFAULTTONEAREST
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(info)
+        if monitor and user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            rect = info.rcWork
+            return rect.left, rect.top, rect.right, rect.bottom
+    except Exception:
+        pass
+    return None
+
+
 def format_skill_name(skill_id):
     """把 skill_id 轉為顯示名稱。
     - 0x00000000  → 「疑似符文傷害」(依 PacketNotes §5,符文附加傷害的 skill ID 為 0)
@@ -3403,6 +3433,8 @@ class LiveDamageMonitor:
         self._tooltip_after_id = None
         try:
             win = tk.Toplevel(self.root)
+            self._tooltip_win = win
+            win.withdraw()  # 完成定位後才顯示,避免先在主螢幕閃現
             win.overrideredirect(True)
             win.attributes("-topmost", True)
             ctk.CTkLabel(win, text=text, font=(FONT_UI, 11),
@@ -3410,14 +3442,34 @@ class LiveDamageMonitor:
                          justify="left", anchor="w", wraplength=360,
                          corner_radius=6).pack(padx=1, pady=1)
             win.update_idletasks()
-            # 以 widget 為中心置中,再夾回螢幕內 —— ? 鈕靠右時直接置中會有一半跑出畫面
-            tip_w = win.winfo_width()
-            x = widget.winfo_rootx() + widget.winfo_width() // 2 - tip_w // 2
-            x = max(0, min(x, self.root.winfo_screenwidth() - tip_w))
-            win.geometry(f"+{x}+{widget.winfo_rooty() + widget.winfo_height() + 4}")
-            self._tooltip_win = win
+            tip_w, tip_h = win.winfo_reqwidth(), win.winfo_reqheight()
+            x, y = self._tooltip_position(widget, tip_w, tip_h)
+            # 前導 + 表示絕對座標;負座標須用 +-N,不能用 -N (Tk 會當成距右/下緣)。
+            win.geometry(f"{tip_w}x{tip_h}+{x}+{y}")
+            win.deiconify()
         except Exception:
-            self._tooltip_win = None
+            self._tooltip_hide()
+
+    def _tooltip_position(self, widget, tip_w, tip_h):
+        """靠近來源元件,限制於游標所在螢幕;底部空間不足時改放元件上方。"""
+        pointer_x, pointer_y = widget.winfo_pointerxy()
+        bounds = get_monitor_work_area(pointer_x, pointer_y)
+        if bounds is None:
+            left, top = widget.winfo_vrootx(), widget.winfo_vrooty()
+            right = left + widget.winfo_vrootwidth()
+            bottom = top + widget.winfo_vrootheight()
+            # 部分平台的 Tk 只回報主螢幕;游標在範圍外時保持靠近元件,不拉回主螢幕。
+            if left <= pointer_x < right and top <= pointer_y < bottom:
+                bounds = left, top, right, bottom
+        x = widget.winfo_rootx() + widget.winfo_width() // 2 - tip_w // 2
+        y = widget.winfo_rooty() + widget.winfo_height() + 4
+        if bounds is not None:
+            left, top, right, bottom = bounds
+            x = max(left, min(x, right - tip_w))
+            if y + tip_h > bottom:
+                y = widget.winfo_rooty() - tip_h - 4
+            y = max(top, min(y, bottom - tip_h))
+        return x, y
 
     def _tooltip_hide(self):
         if self._tooltip_after_id is not None:
